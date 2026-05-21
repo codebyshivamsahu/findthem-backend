@@ -1,7 +1,7 @@
 """
 Find Them India - Face Recognition Server
 OpenCV LBPH - No TensorFlow, No DeepFace - Fast & Lightweight
-Port: 5001
+Render-ready: reads PORT from environment
 """
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -10,7 +10,9 @@ import numpy as np
 from PIL import Image
 
 app = Flask(__name__)
-CORS(app)
+
+# Allow all origins (Vercel frontend + localhost dev)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # ── Image helpers ────────────────────────────────────────────────────────────
 
@@ -68,44 +70,40 @@ def detect_and_crop_face(img_arr):
     gray    = cv2.cvtColor(img_arr, cv2.COLOR_RGB2GRAY)
     faces   = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
     if len(faces) == 0:
-        # Try with relaxed params
         faces = cascade.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3, minSize=(40, 40))
     if len(faces) == 0:
         return None, None
-    # Take largest face
     x, y, w, h = max(faces, key=lambda f: f[2]*f[3])
-    face_gray   = gray[y:y+h, x:x+w]
+    face_gray    = gray[y:y+h, x:x+w]
     face_resized = cv2.resize(face_gray, (150, 150))
     return face_resized, (x, y, w, h)
 
 def compute_histogram(face_gray):
-    """LBPH-style histogram for face comparison"""
+    """HOG features for face comparison"""
     import cv2
-    # Use HOG features for better accuracy
-    hog = cv2.HOGDescriptor((150,150),(15,15),(5,5),(5,5),9)
+    hog  = cv2.HOGDescriptor((150,150),(15,15),(5,5),(5,5),9)
     hist = hog.compute(face_gray)
     return hist.flatten()
 
 def cosine_similarity(a, b):
-    """Cosine similarity between two vectors → 0 to 1"""
-    dot   = np.dot(a, b)
-    norm  = np.linalg.norm(a) * np.linalg.norm(b)
+    dot  = np.dot(a, b)
+    norm = np.linalg.norm(a) * np.linalg.norm(b)
     if norm == 0:
         return 0.0
     return float(dot / norm)
 
 def compare_faces(face1, face2) -> float:
-    """Compare two face arrays → confidence 0-100"""
-    import cv2
-    h1 = compute_histogram(face1)
-    h2 = compute_histogram(face2)
-    sim = cosine_similarity(h1, h2)
-    # sim range: ~0.7-1.0 for same person, ~0.3-0.7 for different
-    # Map to 0-100%
+    h1   = compute_histogram(face1)
+    h2   = compute_histogram(face2)
+    sim  = cosine_similarity(h1, h2)
     conf = (sim - 0.5) / 0.5 * 100
     return round(max(0, min(99.9, conf)), 1)
 
 # ── Routes ───────────────────────────────────────────────────────────────────
+
+@app.route('/')
+def index():
+    return jsonify({'status': 'ok', 'service': 'FindThem India Face Server', 'engine': 'OpenCV-HOG'})
 
 @app.route('/health')
 def health():
@@ -125,7 +123,6 @@ def match():
         print(f"\n{'='*50}")
         print(f"🔍 Match request: {len(cases)} cases")
 
-        # Load & detect face in sighting photo
         sight_arr = get_arr(sight)
         if sight_arr is None:
             return jsonify({'face_detected': False, 'matches': [],
@@ -157,7 +154,6 @@ def match():
 
             for photo in photos:
                 if 'ui-avatars.com' in str(photo):
-                    print(f"  ⚠️  Avatar skip")
                     continue
 
                 case_arr = get_arr(photo)
@@ -214,13 +210,12 @@ def detect():
 
 if __name__ == '__main__':
     import cv2
+    PORT = int(os.environ.get('PORT', 5001))
     print("=" * 50)
     print("🔍  Find Them India — Face Recognition")
     print("🤖  Engine : OpenCV HOG (No TensorFlow!)")
-    print("⚡  Speed  : Fast — no model loading")
-    print("📡  URL    : http://localhost:5001")
+    print(f"📡  Port   : {PORT}")
     print("=" * 50)
-    # Pre-load cascade
     get_cascade()
     print("✅  Ready!")
-    app.run(host='0.0.0.0', port=5001, debug=False, threaded=True)
+    app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
