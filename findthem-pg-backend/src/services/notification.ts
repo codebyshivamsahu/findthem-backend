@@ -1,20 +1,38 @@
 // src/services/notification.ts
-import nodemailer from 'nodemailer';
 
-function getTransporter() {
-  const EMAIL_USER = process.env.EMAIL_USER || '';
-  const EMAIL_PASS = process.env.EMAIL_PASS || '';
-  if (!EMAIL_USER || !EMAIL_PASS) {
-    console.warn('⚠️  EMAIL_USER/EMAIL_PASS not set in .env — emails disabled');
-    return null;
+async function sendViaBrevoAPI(to: string, subject: string, html: string, text: string) {
+  const API_KEY = process.env.BREVO_API_KEY || '';
+  const FROM_EMAIL = process.env.EMAIL_FROM || 'codebyshivamsahu@gmail.com';
+
+  if (!API_KEY) {
+    console.warn('⚠️  BREVO_API_KEY not set — emails disabled');
+    return;
   }
-  return nodemailer.createTransport({
-    host: 'smtp-relay.brevo.com',
-    port: 465,
-    secure: true,
-    auth: { user: EMAIL_USER, pass: EMAIL_PASS },
+
+  const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: {
+      'accept': 'application/json',
+      'api-key': API_KEY,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      sender: { name: 'FindThem India', email: FROM_EMAIL },
+      to: [{ email: to }],
+      subject,
+      htmlContent: html,
+      textContent: text,
+    }),
   });
+
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Brevo API error: ${err}`);
+  }
+  console.log(`✅ Email sent via Brevo API to ${to}`);
 }
+
+// ── Email Templates ──────────────────────────────────────────────────────────
 
 function sightingMatchTemplate(data: {
   personName: string;
@@ -45,7 +63,6 @@ function sightingMatchTemplate(data: {
   .info-value { color: #111827; font-size: 14px; font-weight: 500; }
   .confidence-bar { background: #f3f4f6; border-radius: 8px; height: 10px; margin: 4px 0 16px; }
   .confidence-fill { height: 10px; border-radius: 8px; background: ${confColor}; width: ${data.confidence}%; }
-  .cta { display: block; background: #ea580c; color: white; text-decoration: none; padding: 14px 24px; border-radius: 10px; text-align: center; font-weight: 700; font-size: 15px; margin-top: 20px; }
   .footer { background: #f9fafb; padding: 16px 32px; text-align: center; color: #9ca3af; font-size: 12px; border-top: 1px solid #f3f4f6; }
   .alert-box { background: #fef3c7; border: 1px solid #fde68a; border-radius: 10px; padding: 14px 16px; margin-bottom: 16px; }
 </style></head>
@@ -200,28 +217,24 @@ function caseFiledTemplate(data: {
   };
 }
 
+// ── Public functions ─────────────────────────────────────────────────────────
+
 export async function sendSightingAlert(to: string, data: Parameters<typeof sightingMatchTemplate>[0]) {
-  const transporter = getTransporter();
-  if (!transporter) return;
-  const EMAIL_FROM = process.env.EMAIL_FROM || 'FindThem India <noreply@findthemindia.app>';
   try {
     const { subject, html, text } = sightingMatchTemplate(data);
-    await transporter.sendMail({ from: EMAIL_FROM, to, subject, html, text });
+    await sendViaBrevoAPI(to, subject, html, text);
     console.log(`✅ Sighting alert email sent to ${to}`);
-  } catch (err) {
-    console.error(`❌ Email failed to ${to}:`, err);
+  } catch (err: any) {
+    console.error(`❌ Email failed to ${to}:`, err.message);
   }
 }
 
 export async function sendCaseFiledConfirmation(to: string, data: Parameters<typeof caseFiledTemplate>[0]) {
-  const transporter = getTransporter();
-  if (!transporter) return;
-  const EMAIL_FROM = process.env.EMAIL_FROM || 'FindThem India <noreply@findthemindia.app>';
   try {
     const { subject, html, text } = caseFiledTemplate(data);
-    await transporter.sendMail({ from: EMAIL_FROM, to, subject, html, text });
+    await sendViaBrevoAPI(to, subject, html, text);
     console.log(`✅ Case filed confirmation sent to ${to}`);
-  } catch (err) {
-    console.error(`❌ Email failed to ${to}:`, err);
+  } catch (err: any) {
+    console.error(`❌ Email failed to ${to}:`, err.message);
   }
 }
