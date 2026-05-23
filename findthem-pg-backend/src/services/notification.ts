@@ -1,10 +1,6 @@
 // src/services/notification.ts
 import nodemailer from 'nodemailer';
 
-// ⚠️  Do NOT read process.env at module load time — dotenv may not have run yet.
-//     Always read inside functions so values are resolved at call time.
-
-// Gmail SMTP transporter
 function getTransporter() {
   const EMAIL_USER = process.env.EMAIL_USER || '';
   const EMAIL_PASS = process.env.EMAIL_PASS || '';
@@ -13,12 +9,12 @@ function getTransporter() {
     return null;
   }
   return nodemailer.createTransport({
-    service: 'gmail',
+    host: 'smtp-relay.brevo.com',
+    port: 587,
+    secure: false,
     auth: { user: EMAIL_USER, pass: EMAIL_PASS },
   });
 }
-
-// ── Email Templates ──────────────────────────────────────────────────────────
 
 function sightingMatchTemplate(data: {
   personName: string;
@@ -63,12 +59,10 @@ function sightingMatchTemplate(data: {
     <div class="alert-box">
       <strong>⚠️ Action Required:</strong> A sighting has been reported that may match your missing person case.
     </div>
-
     <span class="badge" style="background:${confColor}20; color:${confColor}; border: 1px solid ${confColor}40;">
       ${data.confidence}% AI Match Confidence
     </span>
     <div class="confidence-bar"><div class="confidence-fill"></div></div>
-
     <div class="info-row">
       <span class="info-label">Case ID</span>
       <span class="info-value" style="font-family:monospace; color:#ea580c;">${data.caseId}</span>
@@ -93,16 +87,14 @@ function sightingMatchTemplate(data: {
       <span class="info-label">Description</span>
       <span class="info-value">${data.description}</span>
     </div>
-
     <p style="color:#374151; font-size:14px; margin-top:16px; line-height:1.6;">
-      Please contact the local police immediately with this case ID and verify the sighting. 
+      Please contact the local police immediately with this case ID and verify the sighting.
       Time is critical — act as soon as possible.
     </p>
-
     <div style="background:#f0fdf4; border:1px solid #bbf7d0; border-radius:10px; padding:14px; margin-top:16px;">
       <p style="margin:0; font-size:13px; color:#166534;">
-        📞 <strong>Emergency:</strong> 112 &nbsp;|&nbsp; 
-        👶 <strong>Child Helpline:</strong> 1098 &nbsp;|&nbsp; 
+        📞 <strong>Emergency:</strong> 112 &nbsp;|&nbsp;
+        👶 <strong>Child Helpline:</strong> 1098 &nbsp;|&nbsp;
         🌐 <strong>Portal:</strong> findthemindia.vercel.app
       </p>
     </div>
@@ -168,7 +160,6 @@ function caseFiledTemplate(data: {
       Your missing person case has been successfully filed. Save your Case ID — you will need it to track updates.
     </p>
     <div class="case-id-box">${data.caseId}</div>
-
     <div class="info-row">
       <span class="info-label">Person</span>
       <span class="info-value">${data.personName}</span>
@@ -181,7 +172,6 @@ function caseFiledTemplate(data: {
       <span class="info-label">Date</span>
       <span class="info-value">${data.lastSeenDate}</span>
     </div>
-
     <div style="background:#f0fdf4; border:1px solid #bbf7d0; border-radius:10px; padding:14px; margin-top:20px;">
       <p style="margin:0; font-size:13px; color:#166534; font-weight:600;">What happens next?</p>
       <ul style="margin:8px 0 0; padding-left:18px; font-size:13px; color:#166534; line-height:1.8;">
@@ -191,10 +181,9 @@ function caseFiledTemplate(data: {
         <li>You will receive email when a sighting is reported</li>
       </ul>
     </div>
-
     <div style="background:#fef9c3; border:1px solid #fde68a; border-radius:10px; padding:14px; margin-top:12px;">
       <p style="margin:0; font-size:13px; color:#92400e;">
-        📞 <strong>Emergency:</strong> 112 &nbsp;|&nbsp; 
+        📞 <strong>Emergency:</strong> 112 &nbsp;|&nbsp;
         👶 <strong>Child Helpline:</strong> 1098 &nbsp;|&nbsp;
         🚔 <strong>Police:</strong> 100
       </p>
@@ -210,8 +199,6 @@ function caseFiledTemplate(data: {
     text: `Case Filed: ${data.caseId}\nPerson: ${data.personName}\nLast Seen: ${data.lastSeenLocation}\nEmergency: 112`,
   };
 }
-
-// ── Public functions ─────────────────────────────────────────────────────────
 
 export async function sendSightingAlert(to: string, data: Parameters<typeof sightingMatchTemplate>[0]) {
   const transporter = getTransporter();
