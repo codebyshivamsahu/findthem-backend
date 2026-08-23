@@ -1,136 +1,100 @@
 // src/services/notification.ts
-import nodemailer from 'nodemailer';
+// Transactional email via the Brevo HTTP API. If BREVO_API_KEY is not set,
+// every send is a no-op — email is optional, never a hard dependency.
+import { config } from '../config';
 
-// ⚠️  Do NOT read process.env at module load time — dotenv may not have run yet.
-//     Always read inside functions so values are resolved at call time.
+const PORTAL_URL = 'https://findthemindia.vercel.app';
 
-// Gmail SMTP transporter
-function getTransporter() {
-  const EMAIL_USER = process.env.EMAIL_USER || '';
-  const EMAIL_PASS = process.env.EMAIL_PASS || '';
-  if (!EMAIL_USER || !EMAIL_PASS) {
-    console.warn('⚠️  EMAIL_USER/EMAIL_PASS not set in .env — emails disabled');
-    return null;
-  }
-  return nodemailer.createTransport({
-    service: 'gmail',
-    auth: { user: EMAIL_USER, pass: EMAIL_PASS },
-  });
+function escapeHtml(value: unknown): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
-// ── Email Templates ──────────────────────────────────────────────────────────
-
-function sightingMatchTemplate(data: {
-  personName: string;
-  caseId: string;
-  confidence: number;
-  location: string;
-  description: string;
-  reporterName: string;
-  reportedAt: string;
-  photoUrl?: string;
-}) {
-  const confColor = data.confidence >= 75 ? '#16a34a' : data.confidence >= 55 ? '#d97706' : '#6b7280';
-  return {
-    subject: `🔔 Sighting Alert: ${data.personName} — ${data.confidence}% Match | FindThem India`,
-    html: `
-<!DOCTYPE html>
-<html>
-<head><meta charset="UTF-8"><style>
-  body { font-family: 'Segoe UI', Arial, sans-serif; background: #f9fafb; margin: 0; padding: 20px; }
-  .container { max-width: 560px; margin: 0 auto; background: white; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
-  .header { background: linear-gradient(135deg, #ea580c, #f97316); padding: 28px 32px; color: white; }
-  .header h1 { margin: 0; font-size: 22px; font-weight: 700; }
-  .header p  { margin: 6px 0 0; opacity: 0.85; font-size: 14px; }
-  .body { padding: 28px 32px; }
-  .badge { display: inline-block; padding: 6px 14px; border-radius: 20px; font-size: 13px; font-weight: 700; margin-bottom: 16px; }
-  .info-row { display: flex; margin-bottom: 12px; }
-  .info-label { color: #6b7280; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; width: 130px; flex-shrink: 0; padding-top: 2px; }
-  .info-value { color: #111827; font-size: 14px; font-weight: 500; }
-  .confidence-bar { background: #f3f4f6; border-radius: 8px; height: 10px; margin: 4px 0 16px; }
-  .confidence-fill { height: 10px; border-radius: 8px; background: ${confColor}; width: ${data.confidence}%; }
-  .cta { display: block; background: #ea580c; color: white; text-decoration: none; padding: 14px 24px; border-radius: 10px; text-align: center; font-weight: 700; font-size: 15px; margin-top: 20px; }
-  .footer { background: #f9fafb; padding: 16px 32px; text-align: center; color: #9ca3af; font-size: 12px; border-top: 1px solid #f3f4f6; }
-  .alert-box { background: #fef3c7; border: 1px solid #fde68a; border-radius: 10px; padding: 14px 16px; margin-bottom: 16px; }
-</style></head>
-<body>
+function shell(title: string, bodyHtml: string, caseId: string): string {
+  return `<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+  body { font-family: 'Segoe UI', Arial, sans-serif; background:#f9fafb; margin:0; padding:20px; }
+  .container { max-width:560px; margin:0 auto; background:#fff; border-radius:16px; overflow:hidden; border:1px solid #f3f4f6; }
+  .header { background:linear-gradient(135deg,#ea580c,#f97316); padding:24px 32px; color:#fff; }
+  .header h1 { margin:0; font-size:20px; }
+  .header p { margin:6px 0 0; opacity:.85; font-size:13px; }
+  .body { padding:26px 32px; color:#374151; font-size:14px; line-height:1.6; }
+  .row { margin-bottom:10px; }
+  .label { color:#6b7280; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.5px; }
+  .value { color:#111827; font-size:14px; }
+  .box { background:#fef3c7; border:1px solid #fde68a; border-radius:10px; padding:14px 16px; margin-bottom:18px; }
+  .help { background:#f0fdf4; border:1px solid #bbf7d0; border-radius:10px; padding:14px; margin-top:18px; font-size:13px; color:#166534; }
+  .footer { background:#f9fafb; padding:16px 32px; text-align:center; color:#9ca3af; font-size:11px; border-top:1px solid #f3f4f6; }
+</style></head><body>
 <div class="container">
-  <div class="header">
-    <h1>🔍 FindThem India</h1>
-    <p>National Missing Persons Portal — Sighting Alert</p>
-  </div>
-  <div class="body">
-    <div class="alert-box">
-      <strong>⚠️ Action Required:</strong> A sighting has been reported that may match your missing person case.
-    </div>
-
-    <span class="badge" style="background:${confColor}20; color:${confColor}; border: 1px solid ${confColor}40;">
-      ${data.confidence}% AI Match Confidence
-    </span>
-    <div class="confidence-bar"><div class="confidence-fill"></div></div>
-
-    <div class="info-row">
-      <span class="info-label">Case ID</span>
-      <span class="info-value" style="font-family:monospace; color:#ea580c;">${data.caseId}</span>
-    </div>
-    <div class="info-row">
-      <span class="info-label">Person</span>
-      <span class="info-value">${data.personName}</span>
-    </div>
-    <div class="info-row">
-      <span class="info-label">Spotted At</span>
-      <span class="info-value">${data.location}</span>
-    </div>
-    <div class="info-row">
-      <span class="info-label">Reported By</span>
-      <span class="info-value">${data.reporterName}</span>
-    </div>
-    <div class="info-row">
-      <span class="info-label">Date & Time</span>
-      <span class="info-value">${new Date(data.reportedAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}</span>
-    </div>
-    <div class="info-row">
-      <span class="info-label">Description</span>
-      <span class="info-value">${data.description}</span>
-    </div>
-
-    <p style="color:#374151; font-size:14px; margin-top:16px; line-height:1.6;">
-      Please contact the local police immediately with this case ID and verify the sighting. 
-      Time is critical — act as soon as possible.
-    </p>
-
-    <div style="background:#f0fdf4; border:1px solid #bbf7d0; border-radius:10px; padding:14px; margin-top:16px;">
-      <p style="margin:0; font-size:13px; color:#166534;">
-        📞 <strong>Emergency:</strong> 112 &nbsp;|&nbsp; 
-        👶 <strong>Child Helpline:</strong> 1098 &nbsp;|&nbsp; 
-        🌐 <strong>Portal:</strong> findthemindia.vercel.app
-      </p>
-    </div>
+  <div class="header"><h1>Find Them India</h1><p>${escapeHtml(title)}</p></div>
+  <div class="body">${bodyHtml}
+    <div class="help">Emergency: <strong>112</strong> &nbsp;|&nbsp; Child Helpline: <strong>1098</strong> &nbsp;|&nbsp; Women's Helpline: <strong>1091</strong></div>
   </div>
   <div class="footer">
-    <p>FindThem India — Government of India Initiative | Ministry of Home Affairs</p>
-    <p>Case ${data.caseId} • This is an automated alert. Do not reply.</p>
+    <p>Find Them India is an independent community platform. It is not operated by, or affiliated with, any government body.</p>
+    <p>Case ${escapeHtml(caseId)} &bull; Automated message, please do not reply. ${PORTAL_URL}</p>
   </div>
-</div>
-</body></html>
-    `,
-    text: `
-FindThem India — Sighting Alert
-
-Case ID: ${data.caseId}
-Person:  ${data.personName}
-Match:   ${data.confidence}%
-Location: ${data.location}
-Reported by: ${data.reporterName}
-Description: ${data.description}
-Time: ${new Date(data.reportedAt).toLocaleString('en-IN')}
-
-Please contact police immediately. Emergency: 112 | Child Helpline: 1098
-    `.trim(),
-  };
+</div></body></html>`;
 }
 
-function caseFiledTemplate(data: {
+function row(label: string, value: unknown): string {
+  return `<div class="row"><div class="label">${escapeHtml(label)}</div><div class="value">${escapeHtml(value)}</div></div>`;
+}
+
+export interface SightingAlertData {
+  personName: string;
+  caseId: string;
+  location: string;
+  description: string;
+  reviewedBy: string;
+  reportedAt: string | Date;
+}
+
+/**
+ * Sent only after a police/admin reviewer has verified a sighting. There is no
+ * "match confidence" in this email — the platform does not produce a number it
+ * can stand behind, and telling a family "87% match" when nothing was compared
+ * is worse than telling them nothing.
+ */
+function sightingVerifiedTemplate(data: SightingAlertData) {
+  const when = new Date(data.reportedAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+  const html = shell(
+    'Verified sighting on your case',
+    `<div class="box"><strong>A sighting on your case has been reviewed and verified.</strong>
+       Please contact your local police with the case ID below.</div>
+     ${row('Case ID', data.caseId)}
+     ${row('Person', data.personName)}
+     ${row('Reported near', data.location)}
+     ${row('Reported at', when)}
+     ${row('Verified by', data.reviewedBy)}
+     ${row('Details', data.description)}
+     <p>A verified sighting means a reviewer considered the report credible. It is not
+     a confirmed identification — only the police can confirm that.</p>`,
+    data.caseId
+  );
+  const text = [
+    'Find Them India — verified sighting',
+    '',
+    `Case ID: ${data.caseId}`,
+    `Person: ${data.personName}`,
+    `Reported near: ${data.location}`,
+    `Reported at: ${when}`,
+    `Verified by: ${data.reviewedBy}`,
+    `Details: ${data.description}`,
+    '',
+    'A verified sighting is a credible report, not a confirmed identification.',
+    'Please contact your local police. Emergency: 112 | Child Helpline: 1098',
+  ].join('\n');
+
+  return { subject: `Verified sighting on case ${data.caseId} — Find Them India`, html, text };
+}
+
+export interface CaseFiledData {
   personName: string;
   caseId: string;
   reporterName: string;
@@ -138,103 +102,69 @@ function caseFiledTemplate(data: {
   lastSeenDate: string;
   district: string;
   state: string;
-}) {
-  return {
-    subject: `✅ Case Filed: ${data.personName} — ${data.caseId} | FindThem India`,
-    html: `
-<!DOCTYPE html>
-<html>
-<head><meta charset="UTF-8"><style>
-  body { font-family: 'Segoe UI', Arial, sans-serif; background: #f9fafb; margin: 0; padding: 20px; }
-  .container { max-width: 560px; margin: 0 auto; background: white; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
-  .header { background: linear-gradient(135deg, #ea580c, #f97316); padding: 28px 32px; color: white; }
-  .header h1 { margin: 0; font-size: 22px; font-weight: 700; }
-  .body { padding: 28px 32px; }
-  .case-id-box { background: #1f2937; color: #f97316; font-family: monospace; font-size: 24px; font-weight: 700; padding: 16px; border-radius: 12px; text-align: center; letter-spacing: 2px; margin: 16px 0; }
-  .info-row { display: flex; margin-bottom: 12px; }
-  .info-label { color: #6b7280; font-size: 12px; font-weight: 600; text-transform: uppercase; width: 130px; flex-shrink: 0; padding-top: 2px; }
-  .info-value { color: #111827; font-size: 14px; font-weight: 500; }
-  .footer { background: #f9fafb; padding: 16px 32px; text-align: center; color: #9ca3af; font-size: 12px; }
-</style></head>
-<body>
-<div class="container">
-  <div class="header">
-    <h1>✅ Case Successfully Filed</h1>
-    <p>FindThem India — Missing Persons Portal</p>
-  </div>
-  <div class="body">
-    <p style="color:#374151; font-size:15px;">Dear <strong>${data.reporterName}</strong>,</p>
-    <p style="color:#374151; font-size:14px; line-height:1.6;">
-      Your missing person case has been successfully filed. Save your Case ID — you will need it to track updates.
-    </p>
-    <div class="case-id-box">${data.caseId}</div>
-
-    <div class="info-row">
-      <span class="info-label">Person</span>
-      <span class="info-value">${data.personName}</span>
-    </div>
-    <div class="info-row">
-      <span class="info-label">Last Seen</span>
-      <span class="info-value">${data.lastSeenLocation}, ${data.district}, ${data.state}</span>
-    </div>
-    <div class="info-row">
-      <span class="info-label">Date</span>
-      <span class="info-value">${data.lastSeenDate}</span>
-    </div>
-
-    <div style="background:#f0fdf4; border:1px solid #bbf7d0; border-radius:10px; padding:14px; margin-top:20px;">
-      <p style="margin:0; font-size:13px; color:#166534; font-weight:600;">What happens next?</p>
-      <ul style="margin:8px 0 0; padding-left:18px; font-size:13px; color:#166534; line-height:1.8;">
-        <li>Nearby police stations will be notified</li>
-        <li>Volunteers in the area will receive alerts</li>
-        <li>AI face matching will run on all sightings</li>
-        <li>You will receive email when a sighting is reported</li>
-      </ul>
-    </div>
-
-    <div style="background:#fef9c3; border:1px solid #fde68a; border-radius:10px; padding:14px; margin-top:12px;">
-      <p style="margin:0; font-size:13px; color:#92400e;">
-        📞 <strong>Emergency:</strong> 112 &nbsp;|&nbsp; 
-        👶 <strong>Child Helpline:</strong> 1098 &nbsp;|&nbsp;
-        🚔 <strong>Police:</strong> 100
-      </p>
-    </div>
-  </div>
-  <div class="footer">
-    <p>FindThem India — Government of India | Ministry of Home Affairs</p>
-    <p>Case ${data.caseId} • Automated confirmation. Do not reply.</p>
-  </div>
-</div>
-</body></html>
-    `,
-    text: `Case Filed: ${data.caseId}\nPerson: ${data.personName}\nLast Seen: ${data.lastSeenLocation}\nEmergency: 112`,
-  };
 }
 
-// ── Public functions ─────────────────────────────────────────────────────────
+function caseFiledTemplate(data: CaseFiledData) {
+  const html = shell(
+    'Case registered',
+    `<p>Hello ${escapeHtml(data.reporterName)}, your report has been registered.
+       Keep the case ID safe — you will need it for any follow-up.</p>
+     ${row('Case ID', data.caseId)}
+     ${row('Person', data.personName)}
+     ${row('Last seen', `${data.lastSeenLocation}, ${data.district}, ${data.state}`)}
+     ${row('Last seen on', data.lastSeenDate)}
+     <p><strong>If you have not already filed a police complaint, do that now.</strong>
+     A police FIR is what actually starts an official search; this portal only helps
+     circulate the details.</p>`,
+    data.caseId
+  );
+  const text = [
+    'Find Them India — case registered',
+    '',
+    `Case ID: ${data.caseId}`,
+    `Person: ${data.personName}`,
+    `Last seen: ${data.lastSeenLocation}, ${data.district}, ${data.state} on ${data.lastSeenDate}`,
+    '',
+    'If you have not filed a police complaint yet, do that now — an FIR is what',
+    'starts an official search. Emergency: 112 | Child Helpline: 1098',
+  ].join('\n');
 
-export async function sendSightingAlert(to: string, data: Parameters<typeof sightingMatchTemplate>[0]) {
-  const transporter = getTransporter();
-  if (!transporter) return;
-  const EMAIL_FROM = process.env.EMAIL_FROM || 'FindThem India <noreply@findthemindia.app>';
-  try {
-    const { subject, html, text } = sightingMatchTemplate(data);
-    await transporter.sendMail({ from: EMAIL_FROM, to, subject, html, text });
-    console.log(`✅ Sighting alert email sent to ${to}`);
-  } catch (err) {
-    console.error(`❌ Email failed to ${to}:`, err);
+  return { subject: `Case ${data.caseId} registered — Find Them India`, html, text };
+}
+
+async function send(to: string, subject: string, html: string, text: string): Promise<void> {
+  if (!config.emailEnabled) {
+    console.warn('Email disabled (BREVO_API_KEY not set) — skipping message to', to);
+    return;
+  }
+
+  const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: {
+      accept: 'application/json',
+      'api-key': config.BREVO_API_KEY as string,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      sender: { name: 'Find Them India', email: config.EMAIL_FROM },
+      to: [{ email: to }],
+      subject,
+      htmlContent: html,
+      textContent: text,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Brevo API returned ${response.status}`);
   }
 }
 
-export async function sendCaseFiledConfirmation(to: string, data: Parameters<typeof caseFiledTemplate>[0]) {
-  const transporter = getTransporter();
-  if (!transporter) return;
-  const EMAIL_FROM = process.env.EMAIL_FROM || 'FindThem India <noreply@findthemindia.app>';
-  try {
-    const { subject, html, text } = caseFiledTemplate(data);
-    await transporter.sendMail({ from: EMAIL_FROM, to, subject, html, text });
-    console.log(`✅ Case filed confirmation sent to ${to}`);
-  } catch (err) {
-    console.error(`❌ Email failed to ${to}:`, err);
-  }
+export async function sendSightingAlert(to: string, data: SightingAlertData): Promise<void> {
+  const { subject, html, text } = sightingVerifiedTemplate(data);
+  await send(to, subject, html, text);
+}
+
+export async function sendCaseFiledConfirmation(to: string, data: CaseFiledData): Promise<void> {
+  const { subject, html, text } = caseFiledTemplate(data);
+  await send(to, subject, html, text);
 }
