@@ -1,60 +1,45 @@
-import initSqlJs, { Database } from 'sql.js';
-import fs from 'fs';
-import path from 'path';
+// src/db/database.ts
+import { Pool } from 'pg';
+import { config } from '../config';
 
-const DB_PATH = path.join(process.cwd(), 'find_them_india.db');
+const pool = new Pool({
+  connectionString: config.DATABASE_URL,
+  ssl: config.isProduction ? { rejectUnauthorized: false } : false,
+  max: 10,
+  idleTimeoutMillis: 30_000,
+  connectionTimeoutMillis: 10_000,
+});
 
-let db: Database;
+pool.on('error', (err) => {
+  // A pooled client died in the background — log it, don't crash the process.
+  console.error('Unexpected PostgreSQL client error:', err.message);
+});
 
-export async function initDatabase(): Promise<Database> {
-  const SQL = await initSqlJs();
-
-  if (fs.existsSync(DB_PATH)) {
-    const fileBuffer = fs.readFileSync(DB_PATH);
-    db = new SQL.Database(fileBuffer);
-    console.log('✅ Loaded existing database from', DB_PATH);
-  } else {
-    db = new SQL.Database();
-    console.log('🆕 Created new database');
-  }
-
-  createTables();
-  return db;
+export async function initDatabase(): Promise<void> {
+  await createTables();
+  await createIndexes();
+  console.log('PostgreSQL connected, schema ready');
 }
 
-function saveDatabase() {
-  const data = db.export();
-  const buffer = Buffer.from(data);
-  fs.writeFileSync(DB_PATH, buffer);
-}
-
-// Auto-save every 5 seconds
-setInterval(() => {
-  if (db) saveDatabase();
-}, 5000);
-
-process.on('exit', () => { if (db) saveDatabase(); });
-process.on('SIGINT', () => { if (db) saveDatabase(); process.exit(); });
-
-function createTables() {
-  db.run(`
+async function createTables(): Promise<void> {
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       email TEXT UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
       phone TEXT,
-      role TEXT DEFAULT 'volunteer',
+      role TEXT NOT NULL DEFAULT 'volunteer',
       district TEXT,
       state TEXT,
       verified INTEGER DEFAULT 0,
       avatar TEXT,
-      created_at TEXT DEFAULT (datetime('now')),
-      updated_at TEXT DEFAULT (datetime('now'))
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
 
-  db.run(`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS missing_persons (
       id TEXT PRIMARY KEY,
       case_id TEXT UNIQUE NOT NULL,
@@ -81,33 +66,32 @@ function createTables() {
       contact_email TEXT,
       match_confidence REAL,
       age_progressed TEXT,
-      reported_at TEXT DEFAULT (datetime('now')),
-      updated_at TEXT DEFAULT (datetime('now')),
-      FOREIGN KEY (reported_by_user_id) REFERENCES users(id)
+      reported_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
 
-  db.run(`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS sightings (
       id TEXT PRIMARY KEY,
       case_id TEXT NOT NULL,
       reported_by TEXT NOT NULL,
       reported_by_user_id TEXT,
-      latitude REAL NOT NULL,
-      longitude REAL NOT NULL,
+      latitude REAL,
+      longitude REAL,
       address TEXT NOT NULL,
       description TEXT NOT NULL,
       photo_url TEXT,
       verified_by_ai INTEGER DEFAULT 0,
       confidence REAL,
       status TEXT DEFAULT 'pending',
-      reported_at TEXT DEFAULT (datetime('now')),
-      FOREIGN KEY (case_id) REFERENCES missing_persons(case_id),
-      FOREIGN KEY (reported_by_user_id) REFERENCES users(id)
+      reviewed_by_user_id TEXT,
+      reviewed_at TIMESTAMPTZ,
+      reported_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
 
-  db.run(`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS case_updates (
       id TEXT PRIMARY KEY,
       case_id TEXT NOT NULL,
@@ -116,12 +100,11 @@ function createTables() {
       role TEXT NOT NULL,
       message TEXT NOT NULL,
       type TEXT DEFAULT 'note',
-      created_at TEXT DEFAULT (datetime('now')),
-      FOREIGN KEY (case_id) REFERENCES missing_persons(case_id)
+      created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
 
-  db.run(`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS alerts (
       id TEXT PRIMARY KEY,
       type TEXT NOT NULL,
@@ -130,35 +113,76 @@ function createTables() {
       case_id TEXT,
       severity TEXT DEFAULT 'medium',
       is_active INTEGER DEFAULT 1,
-      created_at TEXT DEFAULT (datetime('now'))
+      created_by_user_id TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
 
-  console.log('✅ All tables created/verified');
+  // Columns added after the first release — safe to run repeatedly.
+  await pool.query(`ALTER TABLE sightings ADD COLUMN IF NOT EXISTS reviewed_by_user_id TEXT`);
+  await pool.query(`ALTER TABLE sightings ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ`);
+  await pool.query(`ALTER TABLE alerts ADD COLUMN IF NOT EXISTS created_by_user_id TEXT`);
 }
 
-export function getDb(): Database {
-  if (!db) throw new Error('Database not initialized');
-  return db;
+async function createIndexes(): Promise<void> {
+  const statements = [
+    `CREATE INDEX IF NOT EXISTS idx_cases_status ON missing_persons (status)`,
+    `CREATE INDEX IF NOT EXISTS idx_cases_state ON missing_persons (state)`,
+    `CREATE INDEX IF NOT EXISTS idx_cases_reported_at ON missing_persons (reported_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_cases_reporter ON missing_persons (reported_by_user_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_sightings_case ON sightings (case_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_sightings_status ON sightings (status)`,
+    `CREATE INDEX IF NOT EXISTS idx_updates_case ON case_updates (case_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_alerts_active ON alerts (is_active, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_users_email_lower ON users (LOWER(email))`,
+  ];
+  for (const sql of statements) await pool.query(sql);
 }
 
-export function runQuery(sql: string, params: any[] = []): void {
-  getDb().run(sql, params);
-  saveDatabase();
-}
-
-export function getAll(sql: string, params: any[] = []): any[] {
-  const stmt = getDb().prepare(sql);
-  stmt.bind(params);
-  const rows: any[] = [];
-  while (stmt.step()) {
-    rows.push(stmt.getAsObject());
+export async function ping(): Promise<boolean> {
+  try {
+    await pool.query('SELECT 1');
+    return true;
+  } catch {
+    return false;
   }
-  stmt.free();
-  return rows;
 }
 
-export function getOne(sql: string, params: any[] = []): any | null {
-  const rows = getAll(sql, params);
+export async function closeDatabase(): Promise<void> {
+  await pool.end();
+}
+
+/** Run a statement that returns no rows (INSERT / UPDATE / DELETE). */
+export async function runQuery(sql: string, params: any[] = []): Promise<void> {
+  await pool.query(sql, params);
+}
+
+export async function getAll(sql: string, params: any[] = []): Promise<any[]> {
+  const result = await pool.query(sql, params);
+  return result.rows;
+}
+
+export async function getOne(sql: string, params: any[] = []): Promise<any | null> {
+  const rows = await getAll(sql, params);
   return rows.length > 0 ? rows[0] : null;
 }
+
+/** Run several statements inside one transaction. */
+export async function transaction<T>(
+  fn: (q: (sql: string, params?: any[]) => Promise<any>) => Promise<T>
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await fn((sql, params = []) => client.query(sql, params));
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+export default pool;

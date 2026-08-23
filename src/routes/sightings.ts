@@ -1,111 +1,131 @@
-import { sendSightingAlert } from '../services/notification';
-import { Router, Request, Response } from 'express';
+// src/routes/sightings.ts
+import { Router, Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { runQuery, getOne, getAll } from '../db/database';
-import { authenticateToken, optionalAuth, AuthRequest } from '../middleware/auth';
+import { runQuery, getOne, getAll, transaction } from '../db/database';
+import { authenticateToken, requireRole, isStaff, AuthRequest } from '../middleware/auth';
+import { validateBody } from '../middleware/validate';
+import { writeLimiter } from '../middleware/rateLimit';
+import { createSightingSchema, sightingStatusSchema } from '../schemas';
+import { asyncHandler } from '../utils/errors';
+import { sendSightingAlert } from '../services/notification';
 
 const router = Router();
 
-// GET /api/sightings
-router.get('/', optionalAuth, (req: Request, res: Response) => {
-  const { caseId, status } = req.query as any;
-  let sql = 'SELECT * FROM sightings WHERE 1=1';
+/**
+ * Sightings name the person who reported them and pinpoint where someone was
+ * seen, so the list is not public — you have to be signed in.
+ */
+router.get('/', authenticateToken, asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { caseId, status } = req.query as Record<string, string>;
   const params: any[] = [];
-  if (caseId) { sql += ' AND case_id = ?'; params.push(caseId); }
-  if (status) { sql += ' AND status = ?'; params.push(status); }
-  sql += ' ORDER BY reported_at DESC';
-  const rows = getAll(sql, params);
-  res.json({ success: true, data: rows });
-});
+  const where: string[] = [];
+  if (caseId) { params.push(caseId); where.push(`case_id = $${params.length}`); }
+  if (status) { params.push(status); where.push(`status = $${params.length}`); }
+  const whereSql = where.length ? ` WHERE ${where.join(' AND ')}` : '';
+
+  const rows = await getAll(
+    `SELECT * FROM sightings${whereSql} ORDER BY reported_at DESC LIMIT 200`,
+    params
+  );
+
+  // Only staff see who filed a sighting.
+  const data = isStaff(req.user)
+    ? rows
+    : rows.map(({ reported_by, reported_by_user_id, ...rest }) => rest);
+
+  res.json({ success: true, data });
+}));
 
 // POST /api/sightings
-router.post('/', authenticateToken, (req: AuthRequest, res: Response) => {
-  try {
-    const { caseId, latitude, longitude, address, description, photoUrl, confidence: aiConfidence } = req.body;
+router.post('/', authenticateToken, writeLimiter, validateBody(createSightingSchema), asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { caseId, latitude, longitude, address, description, photoUrl } = req.body;
 
-    if (!caseId || !address || !description) {
-      return res.status(400).json({ success: false, message: 'caseId, address, description required' });
-    }
+  const caseRow = await getOne('SELECT * FROM missing_persons WHERE case_id = $1', [caseId]);
+  if (!caseRow) return res.status(404).json({ success: false, message: 'Case not found' });
 
-    const caseRow = getOne('SELECT * FROM missing_persons WHERE case_id = ?', [caseId]);
-    if (!caseRow) return res.status(404).json({ success: false, message: 'Case not found' });
+  const id = uuidv4();
 
-    const id = uuidv4();
-
-    // Use AI confidence from frontend, fallback to random
-    const confidence   = aiConfidence ? Math.round(aiConfidence) : Math.round(60 + Math.random() * 35);
-    const verifiedByAI = confidence >= 65;
-
-    runQuery(
-      `INSERT INTO sightings (id, case_id, reported_by, reported_by_user_id, latitude, longitude, address, description, photo_url, verified_by_ai, confidence, status)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+  /*
+   * A sighting is always created as `pending` with no confidence score.
+   *
+   * The previous version generated a random number between 60 and 95, stored it
+   * as "AI face match confidence", auto-marked the sighting verified, moved the
+   * case to `sighting_reported`, and emailed that number to the family. Nothing
+   * was ever compared. A real score can only come from the face service, and a
+   * human still has to confirm it — so verification is now a police/admin
+   * action (PATCH /:id/status) and the family is only emailed at that point.
+   */
+  await transaction(async (q) => {
+    await q(
+      `INSERT INTO sightings (
+        id, case_id, reported_by, reported_by_user_id, latitude, longitude,
+        address, description, photo_url, verified_by_ai, confidence, status
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
       [
-        id, caseId,
-        req.user!.name, req.user!.id,
-        latitude || null, longitude || null,
-        address, description,
-        photoUrl || null,
-        verifiedByAI ? 1 : 0,
-        confidence,
-        verifiedByAI ? 'verified' : 'pending'
+        id, caseId, req.user!.name, req.user!.id,
+        latitude ?? null, longitude ?? null,
+        address, description, photoUrl || null,
+        0, null, 'pending',
       ]
     );
+    await q(
+      `INSERT INTO case_updates (id, case_id, author, author_user_id, role, message, type)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [uuidv4(), caseId, req.user!.name, req.user!.id, req.user!.role,
+       `Unverified sighting reported at "${address}". Awaiting review.`, 'sighting']
+    );
+  });
 
-    // Update case status
-    if (verifiedByAI) {
-      runQuery(
-        `UPDATE missing_persons SET status = 'sighting_reported', updated_at = datetime('now') WHERE case_id = ? AND status IN ('open','investigating')`,
-        [caseId]
+  const sighting = await getOne('SELECT * FROM sightings WHERE id = $1', [id]);
+  res.status(201).json({
+    success: true,
+    message: 'Sighting submitted for review',
+    data: sighting,
+  });
+}));
+
+// PATCH /api/sightings/:id/status — police / admin only
+router.patch('/:id/status', authenticateToken, requireRole('police', 'admin'), validateBody(sightingStatusSchema), asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { status } = req.body;
+  const existing = await getOne('SELECT * FROM sightings WHERE id = $1', [req.params.id]);
+  if (!existing) return res.status(404).json({ success: false, message: 'Sighting not found' });
+
+  const caseRow = await getOne('SELECT * FROM missing_persons WHERE case_id = $1', [existing.case_id]);
+
+  await transaction(async (q) => {
+    await q(
+      `UPDATE sightings SET status = $1, reviewed_by_user_id = $2, reviewed_at = NOW() WHERE id = $3`,
+      [status, req.user!.id, req.params.id]
+    );
+    if (status === 'verified' && caseRow) {
+      await q(
+        `UPDATE missing_persons SET status = 'sighting_reported', updated_at = NOW()
+         WHERE case_id = $1 AND status IN ('open','investigating')`,
+        [existing.case_id]
       );
     }
-
-    // Add case timeline update
-    runQuery(
-      `INSERT INTO case_updates (id, case_id, author, author_user_id, role, message, type) VALUES (?,?,?,?,?,?,?)`,
-      [uuidv4(), caseId, req.user!.name, req.user!.id, req.user!.role,
-       `Sighting reported at "${address}". AI face match confidence: ${confidence}%.`, 'sighting']
+    await q(
+      `INSERT INTO case_updates (id, case_id, author, author_user_id, role, message, type)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [uuidv4(), existing.case_id, req.user!.name, req.user!.id, req.user!.role,
+       `Sighting at "${existing.address}" marked ${status} after review.`, 'sighting']
     );
+  });
 
-    // ── Send email to case reporter ────────────────────────────────────────
-    const contactEmail = caseRow.contact_email;
-    if (contactEmail) {
-      console.log(`📧 Sending sighting alert to ${contactEmail} (confidence: ${confidence}%)`);
-      sendSightingAlert(contactEmail, {
-        personName:   caseRow.name,
-        caseId:       caseId,
-        confidence:   confidence,
-        location:     address,
-        description:  description,
-        reporterName: req.user!.name,
-        reportedAt:   new Date().toISOString(),
-      }).then(() => {
-        console.log(`✅ Email sent to ${contactEmail}`);
-      }).catch(err => {
-        console.error(`❌ Email failed:`, err.message);
-      });
-    } else {
-      console.warn(`⚠️  Case ${caseId} has no contact email — email not sent`);
-    }
-
-    const sighting = getOne('SELECT * FROM sightings WHERE id = ?', [id]);
-    res.status(201).json({ success: true, data: sighting });
-
-  } catch (err: any) {
-    console.error('Sighting error:', err);
-    res.status(500).json({ success: false, message: err.message });
+  // The family is told about a sighting only once a human has verified it.
+  if (status === 'verified' && caseRow?.contact_email) {
+    sendSightingAlert(caseRow.contact_email, {
+      personName: caseRow.name,
+      caseId: existing.case_id,
+      location: existing.address,
+      description: existing.description,
+      reviewedBy: `${req.user!.name} (${req.user!.role})`,
+      reportedAt: existing.reported_at,
+    }).catch((e) => console.error('Sighting email failed:', e.message));
   }
-});
 
-// PATCH /api/sightings/:id/status
-router.patch('/:id/status', authenticateToken, (req: AuthRequest, res: Response) => {
-  const { status } = req.body;
-  const valid = ['pending', 'verified', 'dismissed'];
-  if (!valid.includes(status)) return res.status(400).json({ success: false, message: 'Invalid status' });
-  const existing = getOne('SELECT * FROM sightings WHERE id = ?', [req.params.id]);
-  if (!existing) return res.status(404).json({ success: false, message: 'Sighting not found' });
-  runQuery('UPDATE sightings SET status = ? WHERE id = ?', [status, req.params.id]);
-  const updated = getOne('SELECT * FROM sightings WHERE id = ?', [req.params.id]);
+  const updated = await getOne('SELECT * FROM sightings WHERE id = $1', [req.params.id]);
   res.json({ success: true, data: updated });
-});
+}));
 
 export default router;

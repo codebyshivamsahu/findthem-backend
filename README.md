@@ -1,126 +1,147 @@
-# Find Them India — Backend API 🇮🇳
+# Find Them India — API
 
-Express.js + SQLite backend for the Find Them India missing persons platform.
+Express + PostgreSQL backend for the Find Them India missing persons platform,
+plus an optional Python face-similarity service.
 
-## 🚀 Quick Start
+> Find Them India is an independent community project. It is **not** operated by,
+> or affiliated with, any government body or police force. Reporting a person
+> here is not a substitute for filing a police complaint (FIR).
+
+## Requirements
+
+- Node.js 20+
+- PostgreSQL 14+ (Render, Supabase, Neon, or local)
+- Python 3.11+ — only for the optional face service
+
+## Setup
 
 ```bash
-# 1. Install dependencies
-npm install
-
-# 2. Seed database with sample data
-npm run seed
-
-# 3. Start development server
+npm ci
+cp .env.example .env        # then fill in DATABASE_URL and JWT_SECRET
+npm run seed                # creates the schema
 npm run dev
 ```
 
-Server runs on: **http://localhost:5000**
-
----
-
-## 🗄️ Database
-
-Uses **SQLite** via `sql.js` — no external database needed!  
-Database file saved at: `find_them_india.db`  
-Auto-saves every 5 seconds.
-
----
-
-## 🔑 Demo Login
-
-| Email | Password |
-|-------|----------|
-| `demo@findthemindia.gov.in` | `demo1234` |
-
----
-
-## 📋 API Endpoints
-
-### Auth
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/auth/register` | Register new user |
-| POST | `/api/auth/login` | Login (returns JWT token) |
-| GET  | `/api/auth/me` | Get current user (auth required) |
-
-### Missing Persons (Cases)
-| Method | Path | Description |
-|--------|------|-------------|
-| GET    | `/api/cases` | List cases (filters: query, status, gender, state, district, ageMin, ageMax) |
-| GET    | `/api/cases/:id` | Get single case |
-| POST   | `/api/cases` | Report new missing person (auth required) |
-| PUT    | `/api/cases/:id` | Update case (auth required) |
-| PATCH  | `/api/cases/:id/status` | Update case status (auth required) |
-| DELETE | `/api/cases/:id` | Delete case (auth required) |
-| GET    | `/api/cases/:id/updates` | Get case timeline updates |
-| POST   | `/api/cases/:id/updates` | Add update to case (auth required) |
-
-### Sightings
-| Method | Path | Description |
-|--------|------|-------------|
-| GET    | `/api/sightings` | List sightings (filter: caseId, status) |
-| POST   | `/api/sightings` | Report new sighting (auth required) |
-| PATCH  | `/api/sightings/:id/status` | Update sighting status (auth required) |
-
-### Statistics & Alerts
-| Method | Path | Description |
-|--------|------|-------------|
-| GET    | `/api/statistics` | Get platform statistics |
-| GET    | `/api/statistics/alerts` | Get active alerts |
-| POST   | `/api/statistics/alerts` | Create alert (auth required) |
-| DELETE | `/api/statistics/alerts/:id` | Dismiss alert (auth required) |
-
----
-
-## 🏗️ Project Structure
-
-```
-src/
-├── db/
-│   └── database.ts      # SQLite setup (sql.js)
-├── middleware/
-│   └── auth.ts          # JWT authentication
-├── routes/
-│   ├── auth.ts          # Login, register, profile
-│   ├── cases.ts         # Missing persons CRUD
-│   ├── sightings.ts     # Sighting reports
-│   └── statistics.ts    # Stats & alerts
-├── seed.ts              # Database seeder
-└── server.ts            # Express app entry point
-```
-
----
-
-## 🔧 Authentication
-
-Use `Authorization: Bearer <token>` header for protected routes.
+Generate a secret:
 
 ```bash
-# Login
-curl -X POST http://localhost:5000/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"email":"demo@findthemindia.gov.in","password":"demo1234"}'
-
-# Use the token
-curl http://localhost:5000/api/cases \
-  -H "Authorization: Bearer <your_token>"
+node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
 ```
 
----
+The server validates its environment at startup and exits with a readable error
+if something required is missing, rather than failing later at runtime.
 
-## 🌐 Connect Frontend
+## Accounts and roles
 
-In `find-them-india/.env.local`:
-```
-NEXT_PUBLIC_API_URL=http://localhost:5000
-```
+There is no shared demo account. Roles are `volunteer`, `ngo`, `police`, `admin`.
 
-Then run both servers:
+Everyone who signs up is a `volunteer` — the signup endpoint ignores any role in
+the request body. Elevate accounts explicitly:
+
 ```bash
-# Terminal 1 — Backend
-cd find-them-backend && npm run dev
+# create the first admin (then clear these env vars)
+ADMIN_EMAIL=you@example.com ADMIN_PASSWORD='<12+ chars>' npm run seed
 
-# Terminal 2 — Frontend  
-cd find-them-india && npm run dev
+# promote anyone else
+npm run promote-user -- someone@example.com police
 ```
+
+If you are upgrading an older deployment, delete the legacy shared demo account,
+whose password was published in this README:
+
+```bash
+npm run remove-demo-user
+```
+
+## What each role can do
+
+| Action | volunteer / ngo | police | admin |
+|---|---|---|---|
+| Browse cases, statistics, alerts | yes (contact details need sign-in) | yes | yes |
+| Report a case | yes | yes | yes |
+| Edit / change status of **own** case | yes | yes | yes |
+| Edit / change status of **any** case | no | yes | yes |
+| Report a sighting | yes | yes | yes |
+| Verify or dismiss a sighting | no | yes | yes |
+| Create or dismiss platform alerts | no | yes | yes |
+| List users, change roles, delete cases | no | no | yes |
+
+## Privacy behaviour worth knowing
+
+- Family contact details (`contactName`, `contactPhone`, `contactEmail`) and the
+  exact `lastSeenAddress` are returned **only to signed-in users**. Anonymous
+  callers get the searchable fields.
+- The sightings list requires authentication — it names reporters and pinpoints
+  locations. Non-staff callers don't see who filed a report.
+- `/api/statistics` is public but aggregates only.
+
+## Sightings and the face service
+
+A sighting is always created as `pending` with no score. The face service returns
+a **photo similarity** number that helps a reporter pick which case to attach
+their report to. It is not an identification, it never marks anything verified,
+and the family is emailed only after a police/admin reviewer verifies the
+sighting.
+
+Run it locally:
+
+```bash
+pip install -r requirements.txt
+python face_server.py            # http://localhost:5001
+```
+
+In production: `gunicorn -w 2 -t 120 -b 0.0.0.0:$PORT face_server:app`
+
+## Environment
+
+See `.env.example`. Required: `DATABASE_URL`, `JWT_SECRET` (32+ chars).
+Common: `PORT`, `NODE_ENV`, `ALLOWED_ORIGINS` (comma-separated).
+Optional: `BREVO_API_KEY` + `EMAIL_FROM` (email is skipped when unset),
+`FACE_SERVICE_URL`.
+
+## API
+
+| Method | Path | Auth |
+|---|---|---|
+| POST | `/api/auth/register` | public (rate limited) |
+| POST | `/api/auth/login` | public (rate limited) |
+| GET / PATCH | `/api/auth/me` | token |
+| GET | `/api/auth/users` | admin |
+| PATCH | `/api/auth/users/:id/role` | admin |
+| GET | `/api/cases` | public (PII hidden) |
+| GET | `/api/cases/:id` | public (PII hidden) |
+| POST | `/api/cases` | token |
+| PUT | `/api/cases/:id` | owner / police / admin |
+| PATCH | `/api/cases/:id/status` | owner / police / admin |
+| DELETE | `/api/cases/:id` | admin |
+| GET / POST | `/api/cases/:id/updates` | token |
+| GET / POST | `/api/sightings` | token |
+| PATCH | `/api/sightings/:id/status` | police / admin |
+| GET | `/api/statistics`, `/api/statistics/alerts` | public |
+| POST / DELETE | `/api/statistics/alerts` | police / admin |
+| GET | `/health` | public (includes a DB ping) |
+
+## Hardening in place
+
+Helmet security headers; CORS restricted to `ALLOWED_ORIGINS`; rate limits
+(10 auth attempts / 15 min, 30 writes / hour, 300 requests / 15 min); every write
+body validated with zod and unknown fields stripped; bcrypt cost 12; constant-time
+login path so the endpoint doesn't reveal which emails exist; 4 MB body cap;
+parameterised SQL everywhere; internal errors hidden in production; graceful
+shutdown; indexes on the columns actually queried.
+
+## Deployment
+
+`render.yaml` describes both services. Set `DATABASE_URL`, `BREVO_API_KEY` and
+`EMAIL_FROM` in the dashboard; `JWT_SECRET` is generated by Render.
+
+## Scripts
+
+| Command | Does |
+|---|---|
+| `npm run dev` | ts-node + nodemon |
+| `npm run build` / `npm start` | compile to `dist/`, run it |
+| `npm run typecheck` | `tsc --noEmit` |
+| `npm run seed` | create schema, optionally bootstrap an admin |
+| `npm run promote-user -- <email> <role>` | change someone's role |
+| `npm run remove-demo-user` | delete the legacy shared demo account |
