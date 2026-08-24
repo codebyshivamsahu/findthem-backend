@@ -46,6 +46,58 @@ function row(label: string, value: unknown): string {
   return `<div class="row"><div class="label">${escapeHtml(label)}</div><div class="value">${escapeHtml(value)}</div></div>`;
 }
 
+export interface PasswordResetData {
+  name: string;
+  resetUrl: string;
+  expiresInMinutes: number;
+}
+
+function passwordResetTemplate(data: PasswordResetData) {
+  const html = `<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+  body { font-family: 'Segoe UI', Arial, sans-serif; background:#f9fafb; margin:0; padding:20px; }
+  .container { max-width:560px; margin:0 auto; background:#fff; border-radius:16px; overflow:hidden; border:1px solid #f3f4f6; }
+  .header { background:linear-gradient(135deg,#ea580c,#f97316); padding:24px 32px; color:#fff; }
+  .header h1 { margin:0; font-size:20px; }
+  .body { padding:26px 32px; color:#374151; font-size:14px; line-height:1.6; }
+  .btn { display:inline-block; background:#ea580c; color:#fff !important; text-decoration:none;
+         padding:12px 28px; border-radius:10px; font-weight:600; margin:18px 0; }
+  .small { color:#6b7280; font-size:12px; word-break:break-all; }
+  .footer { background:#f9fafb; padding:16px 32px; text-align:center; color:#9ca3af; font-size:11px; border-top:1px solid #f3f4f6; }
+</style></head><body>
+<div class="container">
+  <div class="header"><h1>Find Them India</h1></div>
+  <div class="body">
+    <p>Hello ${escapeHtml(data.name)},</p>
+    <p>Someone asked to reset the password on your account. Click below to choose a new one.
+       The link works once and expires in ${data.expiresInMinutes} minutes.</p>
+    <p><a class="btn" href="${data.resetUrl}">Reset my password</a></p>
+    <p class="small">If the button doesn't work, paste this into your browser:<br>${escapeHtml(data.resetUrl)}</p>
+    <p><strong>Didn't request this?</strong> Ignore this email — your password stays as it is.
+       Nobody can change it without this link.</p>
+  </div>
+  <div class="footer">
+    <p>Find Them India is an independent community platform, not operated by any government body.</p>
+    <p>Automated message, please do not reply.</p>
+  </div>
+</div></body></html>`;
+
+  const text = [
+    'Find Them India — password reset',
+    '',
+    `Hello ${data.name},`,
+    '',
+    'Someone asked to reset the password on your account. Open this link to choose',
+    `a new one. It works once and expires in ${data.expiresInMinutes} minutes:`,
+    '',
+    data.resetUrl,
+    '',
+    "Didn't request this? Ignore this email — your password stays as it is.",
+  ].join('\n');
+
+  return { subject: 'Reset your Find Them India password', html, text };
+}
+
 export interface SightingReportedData {
   personName: string;
   caseId: string;
@@ -205,6 +257,11 @@ async function send(to: string, subject: string, html: string, text: string): Pr
   if (!response.ok) {
     throw new Error(`Brevo API returned ${response.status}`);
   }
+}
+
+export async function sendPasswordReset(to: string, data: PasswordResetData): Promise<void> {
+  const { subject, html, text } = passwordResetTemplate(data);
+  await send(to, subject, html, text);
 }
 
 export async function sendSightingReported(to: string, data: SightingReportedData): Promise<void> {

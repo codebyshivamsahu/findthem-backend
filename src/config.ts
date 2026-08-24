@@ -18,6 +18,9 @@ const schema = z.object({
   // Comma-separated list of browser origins allowed to call this API.
   ALLOWED_ORIGINS: z.string().default('http://localhost:3000'),
 
+  // Where password-reset links point. Defaults to the first allowed origin.
+  FRONTEND_URL: z.string().url().optional(),
+
   // Optional: face matching microservice (face_server.py). Sightings work
   // without it — they just don't get a confidence score.
   FACE_SERVICE_URL: z.string().url().optional(),
@@ -44,6 +47,10 @@ export const config = {
   ...env,
   isProduction: env.NODE_ENV === 'production',
   allowedOrigins: env.ALLOWED_ORIGINS.split(',').map((o) => o.trim()).filter(Boolean),
+  frontendUrl:
+    env.FRONTEND_URL ||
+    env.ALLOWED_ORIGINS.split(',')[0].trim() ||
+    'http://localhost:3000',
   emailEnabled: Boolean(env.BREVO_API_KEY),
 };
 

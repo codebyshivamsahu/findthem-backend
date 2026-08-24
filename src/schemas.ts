@@ -37,6 +37,13 @@ export const loginSchema = z.object({
   password: z.string().min(1).max(200),
 });
 
+export const forgotPasswordSchema = z.object({ email });
+
+export const resetPasswordSchema = z.object({
+  token: z.string().trim().min(20).max(200),
+  password: z.string().min(8, 'Password must be at least 8 characters').max(200),
+});
+
 export const createCaseSchema = z.object({
   name: shortText,
   age: z.coerce.number().int().min(0).max(120),

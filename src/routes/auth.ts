@@ -1,6 +1,7 @@
 // src/routes/auth.ts
 import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { runQuery, getOne, getAll } from '../db/database';
 import {
@@ -8,8 +9,10 @@ import {
 } from '../middleware/auth';
 import { validateBody } from '../middleware/validate';
 import { authLimiter } from '../middleware/rateLimit';
-import { registerSchema, loginSchema } from '../schemas';
+import { registerSchema, loginSchema, forgotPasswordSchema, resetPasswordSchema } from '../schemas';
 import { asyncHandler } from '../utils/errors';
+import { sendPasswordReset } from '../services/notification';
+import { config } from '../config';
 
 const router = Router();
 
@@ -123,6 +126,80 @@ router.patch('/users/:id/role', authenticateToken, requireRole('admin'), asyncHa
 
   await runQuery('UPDATE users SET role = $1, updated_at = NOW() WHERE id = $2', [role, req.params.id]);
   res.json({ success: true, message: `Role updated to ${role}` });
+}));
+
+const RESET_TTL_MINUTES = 60;
+
+function hashToken(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+// POST /api/auth/forgot-password
+router.post('/forgot-password', authLimiter, validateBody(forgotPasswordSchema), asyncHandler(async (req: Request, res: Response) => {
+  const { email } = req.body;
+
+  const user = await getOne('SELECT id, name, email FROM users WHERE LOWER(email) = LOWER($1)', [email]);
+
+  if (user) {
+    // Only the hash is stored. A leaked database still can't be used to reset
+    // anyone's password, because the token in the email is never written down.
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + RESET_TTL_MINUTES * 60_000);
+
+    // One live link per user: asking again invalidates the previous email.
+    await runQuery('DELETE FROM password_resets WHERE user_id = $1', [user.id]);
+    await runQuery(
+      'INSERT INTO password_resets (token_hash, user_id, expires_at) VALUES ($1,$2,$3)',
+      [hashToken(token), user.id, expiresAt]
+    );
+
+    const resetUrl = `${config.frontendUrl.replace(/\/$/, '')}/reset-password?token=${token}`;
+
+    if (!config.isProduction) {
+      // Local dev has no email provider configured, so print the link.
+      console.log(`\nPassword reset link for ${user.email}:\n${resetUrl}\n`);
+    }
+
+    sendPasswordReset(user.email, {
+      name: user.name,
+      resetUrl,
+      expiresInMinutes: RESET_TTL_MINUTES,
+    }).catch((e) => console.error('Reset email failed:', e.message));
+  }
+
+  // Same answer either way. Differentiating would turn this endpoint into a way
+  // to check which email addresses have accounts here.
+  res.json({
+    success: true,
+    message: 'If an account exists for that email, a reset link has been sent.',
+  });
+}));
+
+// POST /api/auth/reset-password
+router.post('/reset-password', authLimiter, validateBody(resetPasswordSchema), asyncHandler(async (req: Request, res: Response) => {
+  const { token, password } = req.body;
+
+  const record = await getOne(
+    `SELECT user_id, expires_at, used_at FROM password_resets WHERE token_hash = $1`,
+    [hashToken(token)]
+  );
+
+  const invalid = !record || record.used_at || new Date(record.expires_at) < new Date();
+  if (invalid) {
+    return res.status(400).json({
+      success: false,
+      message: 'This reset link is invalid or has expired. Please request a new one.',
+    });
+  }
+
+  const password_hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+  await runQuery('UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2',
+    [password_hash, record.user_id]);
+
+  // Burn the token, and clear any other outstanding links for this account.
+  await runQuery('DELETE FROM password_resets WHERE user_id = $1', [record.user_id]);
+
+  res.json({ success: true, message: 'Password updated. You can sign in now.' });
 }));
 
 export default router;
