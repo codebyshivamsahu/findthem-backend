@@ -46,6 +46,54 @@ function row(label: string, value: unknown): string {
   return `<div class="row"><div class="label">${escapeHtml(label)}</div><div class="value">${escapeHtml(value)}</div></div>`;
 }
 
+export interface SightingReportedData {
+  personName: string;
+  caseId: string;
+  location: string;
+  description: string;
+  reportedAt: string | Date;
+}
+
+/**
+ * Sent automatically, the moment a sighting is filed. No review, no waiting.
+ *
+ * There is deliberately no "match confidence" figure in here. The face service
+ * compares image gradients, not identities — it cannot tell you a sighting is
+ * the missing person, and a percentage in this email would read as if it could.
+ * The family gets what is actually actionable: where, when, and what was seen.
+ */
+function sightingReportedTemplate(data: SightingReportedData) {
+  const when = new Date(data.reportedAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+  const html = shell(
+    'New sighting reported on your case',
+    `<div class="box"><strong>Someone has reported a possible sighting on your case.</strong>
+       This report has not been checked by anyone yet. Please pass the details to
+       the police handling your case, along with the case ID.</div>
+     ${row('Case ID', data.caseId)}
+     ${row('Person', data.personName)}
+     ${row('Reported near', data.location)}
+     ${row('Reported at', when)}
+     ${row('What was reported', data.description)}
+     <p>Anyone can submit a sighting, so this may or may not be your family member.
+     Treat it as a lead to give the police, not as confirmation.</p>`,
+    data.caseId
+  );
+  const text = [
+    'Find Them India — new sighting reported',
+    '',
+    `Case ID: ${data.caseId}`,
+    `Person: ${data.personName}`,
+    `Reported near: ${data.location}`,
+    `Reported at: ${when}`,
+    `What was reported: ${data.description}`,
+    '',
+    'This report has not been checked by anyone. Treat it as a lead for the police,',
+    'not as confirmation. Emergency: 112 | Child Helpline: 1098',
+  ].join('\n');
+
+  return { subject: `New sighting on case ${data.caseId} — Find Them India`, html, text };
+}
+
 export interface SightingAlertData {
   personName: string;
   caseId: string;
@@ -157,6 +205,11 @@ async function send(to: string, subject: string, html: string, text: string): Pr
   if (!response.ok) {
     throw new Error(`Brevo API returned ${response.status}`);
   }
+}
+
+export async function sendSightingReported(to: string, data: SightingReportedData): Promise<void> {
+  const { subject, html, text } = sightingReportedTemplate(data);
+  await send(to, subject, html, text);
 }
 
 export async function sendSightingAlert(to: string, data: SightingAlertData): Promise<void> {

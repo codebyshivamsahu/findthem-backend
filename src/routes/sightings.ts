@@ -7,9 +7,18 @@ import { validateBody } from '../middleware/validate';
 import { writeLimiter } from '../middleware/rateLimit';
 import { createSightingSchema, sightingStatusSchema } from '../schemas';
 import { asyncHandler } from '../utils/errors';
-import { sendSightingAlert } from '../services/notification';
+import { sendSightingAlert, sendSightingReported } from '../services/notification';
+import { scoreSightingPhoto } from '../services/faceMatch';
 
 const router = Router();
+
+function parsePhotos(photos: any): string[] {
+  if (!photos) return [];
+  if (typeof photos === 'string') {
+    try { return JSON.parse(photos); } catch { return []; }
+  }
+  return photos;
+}
 
 /**
  * Sightings name the person who reported them and pinpoint where someone was
@@ -46,14 +55,18 @@ router.post('/', authenticateToken, writeLimiter, validateBody(createSightingSch
   const id = uuidv4();
 
   /*
-   * A sighting is always created as `pending` with no confidence score.
+   * Everything here is automatic — nobody has to be online for a report to
+   * land, for the case to update, or for the family to hear about it.
    *
-   * The previous version generated a random number between 60 and 95, stored it
-   * as "AI face match confidence", auto-marked the sighting verified, moved the
-   * case to `sighting_reported`, and emailed that number to the family. Nothing
-   * was ever compared. A real score can only come from the face service, and a
-   * human still has to confirm it — so verification is now a police/admin
-   * action (PATCH /:id/status) and the family is only emailed at that point.
+   * What is NOT automatic is calling something a match. The face service
+   * compares image gradients, so its score can neither confirm nor rule out an
+   * identity: it is stored for reviewers to sort by and shown in the dashboard,
+   * but it never sets `verified`, and it never goes in an email. A percentage
+   * in a message to a parent reads as certainty the platform does not have.
+   *
+   * (The previous version filled this field with Math.random() * 35 + 60 when
+   * the service didn't answer, marked the sighting verified off that number,
+   * and emailed it to the family as "AI Match Confidence".)
    */
   await transaction(async (q) => {
     await q(
@@ -72,16 +85,42 @@ router.post('/', authenticateToken, writeLimiter, validateBody(createSightingSch
       `INSERT INTO case_updates (id, case_id, author, author_user_id, role, message, type)
        VALUES ($1,$2,$3,$4,$5,$6,$7)`,
       [uuidv4(), caseId, req.user!.name, req.user!.id, req.user!.role,
-       `Unverified sighting reported at "${address}". Awaiting review.`, 'sighting']
+       `Sighting reported at "${address}". Not yet reviewed.`, 'sighting']
+    );
+    // The case moves immediately so it surfaces to police and on the dashboard.
+    await q(
+      `UPDATE missing_persons SET status = 'sighting_reported', updated_at = NOW()
+       WHERE case_id = $1 AND status IN ('open','investigating')`,
+      [caseId]
     );
   });
+
+  // Family is notified straight away — location, time and description, no score.
+  if (caseRow.contact_email) {
+    sendSightingReported(caseRow.contact_email, {
+      personName: caseRow.name,
+      caseId,
+      location: address,
+      description,
+      reportedAt: new Date(),
+    }).catch((e) => console.error('Sighting email failed:', e.message));
+  }
 
   const sighting = await getOne('SELECT * FROM sightings WHERE id = $1', [id]);
   res.status(201).json({
     success: true,
-    message: 'Sighting submitted for review',
+    message: 'Sighting submitted. The family has been notified.',
     data: sighting,
   });
+
+  // Scoring runs after the response so a sleeping face service can never delay
+  // or block a report. Failure just leaves the score empty.
+  scoreSightingPhoto(photoUrl, caseId, parsePhotos(caseRow.photos))
+    .then((score) => {
+      if (score === null) return;
+      return runQuery('UPDATE sightings SET confidence = $1 WHERE id = $2', [score, id]);
+    })
+    .catch((e) => console.error('Similarity scoring failed:', e?.message || e));
 }));
 
 // PATCH /api/sightings/:id/status — police / admin only
