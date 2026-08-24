@@ -2,7 +2,7 @@
   "name": "findthem-backend",
   "version": "1.0.0",
   "private": true,
-  "description": "Find Them India — missing persons platform API (Express + PostgreSQL)",
+  "description": "Find Them India \u2014 missing persons platform API (Express + PostgreSQL)",
   "main": "dist/server.js",
   "engines": {
     "node": ">=20"
