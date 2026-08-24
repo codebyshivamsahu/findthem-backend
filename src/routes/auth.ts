@@ -9,9 +9,9 @@ import {
 } from '../middleware/auth';
 import { validateBody } from '../middleware/validate';
 import { authLimiter } from '../middleware/rateLimit';
-import { registerSchema, loginSchema, forgotPasswordSchema, resetPasswordSchema } from '../schemas';
+import { registerSchema, loginSchema, forgotPasswordSchema, resetPasswordSchema, verifyEmailSchema, changePasswordSchema } from '../schemas';
 import { asyncHandler } from '../utils/errors';
-import { sendPasswordReset } from '../services/notification';
+import { sendPasswordReset, sendEmailVerification } from '../services/notification';
 import { config } from '../config';
 
 const router = Router();
@@ -43,13 +43,34 @@ router.post('/register', authLimiter, validateBody(registerSchema), asyncHandler
     [id, name, email, password_hash, phone || null, role, district || null, state || null, 0]
   );
 
+  // Confirmation email. The account works either way — this records that the
+  // address is real, it does not gate access.
+  issueEmailVerification(id, name, email).catch((e) =>
+    console.error('Verification email failed:', e.message));
+
   const token = signToken({ id, email, role, name });
   res.status(201).json({
     success: true,
-    message: 'Registration successful',
+    message: 'Registration successful. Check your email to confirm your address.',
     data: { token, user: { id, name, email, phone, role, district, state, verified: false } },
   });
 }));
+
+async function issueEmailVerification(userId: string, name: string, email: string) {
+  const token = crypto.randomBytes(32).toString('hex');
+  const expiresAt = new Date(Date.now() + VERIFY_TTL_HOURS * 3_600_000);
+
+  await runQuery('DELETE FROM email_verifications WHERE user_id = $1', [userId]);
+  await runQuery(
+    'INSERT INTO email_verifications (token_hash, user_id, expires_at) VALUES ($1,$2,$3)',
+    [hashToken(token), userId, expiresAt]
+  );
+
+  const verifyUrl = `${config.frontendUrl.replace(/\/$/, '')}/verify-email?token=${token}`;
+  if (!config.isProduction) console.log(`\nEmail verification link for ${email}:\n${verifyUrl}\n`);
+
+  await sendEmailVerification(email, { name, verifyUrl, expiresInHours: VERIFY_TTL_HOURS });
+}
 
 // POST /api/auth/login
 router.post('/login', authLimiter, validateBody(loginSchema), asyncHandler(async (req: Request, res: Response) => {
@@ -129,6 +150,7 @@ router.patch('/users/:id/role', authenticateToken, requireRole('admin'), asyncHa
 }));
 
 const RESET_TTL_MINUTES = 60;
+const VERIFY_TTL_HOURS = 24;
 
 function hashToken(token: string): string {
   return crypto.createHash('sha256').update(token).digest('hex');
@@ -200,6 +222,58 @@ router.post('/reset-password', authLimiter, validateBody(resetPasswordSchema), a
   await runQuery('DELETE FROM password_resets WHERE user_id = $1', [record.user_id]);
 
   res.json({ success: true, message: 'Password updated. You can sign in now.' });
+}));
+
+// POST /api/auth/change-password — signed in, and must prove the old password
+router.post('/change-password', authenticateToken, validateBody(changePasswordSchema), asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { currentPassword, newPassword } = req.body;
+
+  const user = await getOne('SELECT id, password_hash FROM users WHERE id = $1', [req.user!.id]);
+  if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+  const valid = await bcrypt.compare(currentPassword, user.password_hash);
+  if (!valid) {
+    return res.status(401).json({ success: false, message: 'Your current password is incorrect' });
+  }
+
+  const password_hash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+  await runQuery('UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2',
+    [password_hash, user.id]);
+
+  // Any outstanding reset links for this account are no longer wanted.
+  await runQuery('DELETE FROM password_resets WHERE user_id = $1', [user.id]);
+
+  res.json({ success: true, message: 'Password updated.' });
+}));
+
+// POST /api/auth/verify-email
+router.post('/verify-email', authLimiter, validateBody(verifyEmailSchema), asyncHandler(async (req: Request, res: Response) => {
+  const record = await getOne(
+    'SELECT user_id, expires_at FROM email_verifications WHERE token_hash = $1',
+    [hashToken(req.body.token)]
+  );
+
+  if (!record || new Date(record.expires_at) < new Date()) {
+    return res.status(400).json({
+      success: false,
+      message: 'This confirmation link is invalid or has expired. Request a new one from your profile.',
+    });
+  }
+
+  await runQuery('UPDATE users SET verified = 1, updated_at = NOW() WHERE id = $1', [record.user_id]);
+  await runQuery('DELETE FROM email_verifications WHERE user_id = $1', [record.user_id]);
+
+  res.json({ success: true, message: 'Email confirmed.' });
+}));
+
+// POST /api/auth/resend-verification
+router.post('/resend-verification', authLimiter, authenticateToken, asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = await getOne('SELECT id, name, email, verified FROM users WHERE id = $1', [req.user!.id]);
+  if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+  if (user.verified) return res.json({ success: true, message: 'Your email is already confirmed.' });
+
+  await issueEmailVerification(user.id, user.name, user.email);
+  res.json({ success: true, message: 'Confirmation email sent.' });
 }));
 
 export default router;

@@ -128,6 +128,15 @@ async function createTables(): Promise<void> {
     )
   `);
 
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS email_verifications (
+      token_hash TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
   // Columns added after the first release — safe to run repeatedly.
   await pool.query(`ALTER TABLE sightings ADD COLUMN IF NOT EXISTS reviewed_by_user_id TEXT`);
   await pool.query(`ALTER TABLE sightings ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ`);
@@ -146,6 +155,7 @@ async function createIndexes(): Promise<void> {
     `CREATE INDEX IF NOT EXISTS idx_alerts_active ON alerts (is_active, created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_users_email_lower ON users (LOWER(email))`,
     `CREATE INDEX IF NOT EXISTS idx_password_resets_user ON password_resets (user_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_email_verifications_user ON email_verifications (user_id)`,
   ];
   for (const sql of statements) await pool.query(sql);
 }
